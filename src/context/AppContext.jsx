@@ -3,6 +3,12 @@ import { createContext, useContext, useReducer } from 'react';
 /**
  * Application Context
  * Manages global state across all 4 steps
+ *
+ * TEMPLATE STATE FIX:
+ * - activeTemplate is the SINGLE SOURCE OF TRUTH for the current template
+ * - Template HTML must ONLY be updated via SET_ACTIVE_TEMPLATE or UPDATE_ACTIVE_TEMPLATE_HTML
+ * - All previews, editors, and PDF generation read from state.activeTemplate.html
+ * - NO local component state should duplicate the template HTML
  */
 const AppContext = createContext();
 
@@ -19,7 +25,7 @@ const initialState = {
   // Step 2: Recipients
   selectedRecipients: [],
 
-  // Step 3: Template
+  // Step 3: Template — SINGLE SOURCE OF TRUTH
   activeTemplate: null,
   templates: [],
   logoUrl: '',
@@ -50,10 +56,13 @@ const ACTIONS = {
   DESELECT_ALL: 'DESELECT_ALL',
   SET_TEMPLATES: 'SET_TEMPLATES',
   SET_ACTIVE_TEMPLATE: 'SET_ACTIVE_TEMPLATE',
+  UPDATE_ACTIVE_TEMPLATE_HTML: 'UPDATE_ACTIVE_TEMPLATE_HTML',
+  UPDATE_ACTIVE_TEMPLATE_SUBJECT: 'UPDATE_ACTIVE_TEMPLATE_SUBJECT',
   SET_LOGO: 'SET_LOGO',
   SET_SMTP: 'SET_SMTP',
   SET_SEND_RESULTS: 'SET_SEND_RESULTS',
   SET_SENDING: 'SET_SENDING',
+  RESET_WORKFLOW: 'RESET_WORKFLOW',
   RESET: 'RESET',
 };
 
@@ -69,7 +78,7 @@ function appReducer(state, action) {
         csvData: action.payload.data,
         csvColumns: action.payload.columns,
         csvFileName: action.payload.fileName,
-        selectedRecipients: action.payload.data.map((_, i) => i), // Select all by default
+        selectedRecipients: action.payload.data.map((_, i) => i),
       };
 
     case ACTIONS.UPDATE_ROW:
@@ -127,6 +136,27 @@ function appReducer(state, action) {
     case ACTIONS.SET_ACTIVE_TEMPLATE:
       return { ...state, activeTemplate: action.payload };
 
+    /**
+     * KEY FIX: Direct template HTML update
+     * This updates ONLY the html field of activeTemplate without replacing the entire object.
+     * Used by the editor to keep state in sync without a full re-render.
+     */
+    case ACTIONS.UPDATE_ACTIVE_TEMPLATE_HTML:
+      return {
+        ...state,
+        activeTemplate: state.activeTemplate
+          ? { ...state.activeTemplate, html: action.payload }
+          : state.activeTemplate,
+      };
+
+    case ACTIONS.UPDATE_ACTIVE_TEMPLATE_SUBJECT:
+      return {
+        ...state,
+        activeTemplate: state.activeTemplate
+          ? { ...state.activeTemplate, subject: action.payload }
+          : state.activeTemplate,
+      };
+
     case ACTIONS.SET_LOGO:
       return { ...state, logoUrl: action.payload };
 
@@ -138,6 +168,22 @@ function appReducer(state, action) {
 
     case ACTIONS.SET_SENDING:
       return { ...state, isSending: action.payload };
+
+    /**
+     * RESET WORKFLOW: Clear CSV, send results, and navigation
+     * Preserves user's templates and SMTP config
+     */
+    case ACTIONS.RESET_WORKFLOW:
+      return {
+        ...state,
+        currentStep: 0,
+        csvData: [],
+        csvColumns: [],
+        csvFileName: '',
+        selectedRecipients: [],
+        sendResults: [],
+        isSending: false,
+      };
 
     case ACTIONS.RESET:
       return initialState;

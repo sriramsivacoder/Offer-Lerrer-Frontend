@@ -3,12 +3,26 @@ import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
 import toast from 'react-hot-toast';
 import { useAppContext } from '../context/AppContext';
-import { PLACEHOLDERS, replacePlaceholders } from '../utils/placeholders';
-import { fetchTemplates, createTemplate, updateTemplate, uploadLogo, getLogos } from '../services/api';
+import { PLACEHOLDERS } from '../utils/placeholders';
+import { renderTemplate } from '../utils/templateRenderer';
+import {
+  fetchTemplates,
+  createTemplate,
+  updateTemplate as updateTemplateApi,
+  resetTemplateToDefault,
+  uploadLogo,
+  getLogos,
+} from '../services/api';
 
 /**
  * Step 3 — Customize Template
- * Template selector, rich text editor, placeholder insertion, logo upload, and live preview
+ *
+ * BUG FIX: Removed separate `htmlCode` state.
+ * All template HTML now flows through a SINGLE SOURCE OF TRUTH:
+ *   state.activeTemplate.html (via AppContext)
+ *
+ * Both the Visual editor and HTML editor read/write from this same source.
+ * This prevents the desync bug where edits in one mode weren't reflected in another.
  */
 
 // React Quill toolbar configuration
@@ -35,7 +49,6 @@ function Step3Template() {
 
   const [isLoading, setIsLoading] = useState(true);
   const [showHtmlEditor, setShowHtmlEditor] = useState(false);
-  const [htmlCode, setHtmlCode] = useState('');
   const [showPreview, setShowPreview] = useState(false);
   const [logos, setLogos] = useState([]);
   const [isSaving, setIsSaving] = useState(false);
@@ -56,7 +69,6 @@ function Step3Template() {
       dispatch({ type: ACTIONS.SET_TEMPLATES, payload: data });
       if (!activeTemplate && data.length > 0) {
         dispatch({ type: ACTIONS.SET_ACTIVE_TEMPLATE, payload: data[0] });
-        setHtmlCode(data[0].html);
       }
     } catch (err) {
       toast.error('Failed to load templates');
@@ -74,62 +86,52 @@ function Step3Template() {
     }
   };
 
-  // Select template
+  /**
+   * Select a template from the cards
+   * Loads its HTML directly into activeTemplate — no separate state needed
+   */
   const handleSelectTemplate = (template) => {
     dispatch({ type: ACTIONS.SET_ACTIVE_TEMPLATE, payload: template });
-    setHtmlCode(template.html);
   };
 
-  // Quill editor change
+  /**
+   * Visual (Quill) editor change
+   * Directly updates activeTemplate.html in context
+   */
   const handleEditorChange = (content) => {
-    if (activeTemplate) {
-      dispatch({
-        type: ACTIONS.SET_ACTIVE_TEMPLATE,
-        payload: { ...activeTemplate, html: content },
-      });
-    }
+    dispatch({ type: ACTIONS.UPDATE_ACTIVE_TEMPLATE_HTML, payload: content });
   };
 
-  // HTML editor change
+  /**
+   * HTML editor change
+   * SAME source of truth — updates activeTemplate.html
+   * NO SEPARATE htmlCode STATE
+   */
   const handleHtmlChange = (e) => {
-    const html = e.target.value;
-    setHtmlCode(html);
-    if (activeTemplate) {
-      dispatch({
-        type: ACTIONS.SET_ACTIVE_TEMPLATE,
-        payload: { ...activeTemplate, html },
-      });
-    }
+    dispatch({ type: ACTIONS.UPDATE_ACTIVE_TEMPLATE_HTML, payload: e.target.value });
   };
 
-  // Toggle HTML mode
+  /**
+   * Toggle between Visual and HTML editor
+   * Both read from the same activeTemplate.html — no sync needed
+   */
   const toggleHtmlEditor = () => {
-    if (showHtmlEditor) {
-      // Switching from HTML to visual mode
-      if (activeTemplate) {
-        dispatch({
-          type: ACTIONS.SET_ACTIVE_TEMPLATE,
-          payload: { ...activeTemplate, html: htmlCode },
-        });
-      }
-    } else {
-      // Switching to HTML mode
-      setHtmlCode(activeTemplate?.html || '');
-    }
     setShowHtmlEditor(!showHtmlEditor);
   };
 
-  // Insert placeholder
+  /**
+   * Insert placeholder into the template
+   */
   const insertPlaceholder = (placeholder) => {
     if (showHtmlEditor) {
-      setHtmlCode((prev) => prev + placeholder);
-      if (activeTemplate) {
-        dispatch({
-          type: ACTIONS.SET_ACTIVE_TEMPLATE,
-          payload: { ...activeTemplate, html: htmlCode + placeholder },
-        });
-      }
+      // HTML mode: append at cursor or end
+      const currentHtml = activeTemplate?.html || '';
+      dispatch({
+        type: ACTIONS.UPDATE_ACTIVE_TEMPLATE_HTML,
+        payload: currentHtml + placeholder,
+      });
     } else {
+      // Visual mode: insert at Quill cursor
       const quill = quillRef.current?.getEditor();
       if (quill) {
         const range = quill.getSelection(true);
@@ -140,13 +142,16 @@ function Step3Template() {
     toast.success(`Inserted ${placeholder}`);
   };
 
-  // Save template
+  /**
+   * Save template to backend
+   * Reads from the single source of truth: activeTemplate
+   */
   const handleSave = async () => {
     if (!activeTemplate) return;
     setIsSaving(true);
     try {
       if (activeTemplate._id) {
-        const res = await updateTemplate(activeTemplate._id, {
+        const res = await updateTemplateApi(activeTemplate._id, {
           name: activeTemplate.name,
           subject: activeTemplate.subject,
           html: activeTemplate.html,
@@ -154,6 +159,13 @@ function Step3Template() {
         });
         toast.success('Template saved');
         dispatch({ type: ACTIONS.SET_ACTIVE_TEMPLATE, payload: res.data.data });
+        // Also update the templates list to keep it in sync
+        dispatch({
+          type: ACTIONS.SET_TEMPLATES,
+          payload: templates.map((t) =>
+            t._id === res.data.data._id ? res.data.data : t
+          ),
+        });
       } else {
         const res = await createTemplate({
           name: activeTemplate.name,
@@ -172,13 +184,32 @@ function Step3Template() {
     }
   };
 
-  // Reset template
-  const handleReset = () => {
-    const original = templates.find((t) => t._id === activeTemplate?._id);
-    if (original) {
-      dispatch({ type: ACTIONS.SET_ACTIVE_TEMPLATE, payload: { ...original } });
-      setHtmlCode(original.html);
-      toast.success('Template reset');
+  /**
+   * Reset template to default content (server-side)
+   */
+  const handleReset = async () => {
+    if (!activeTemplate?._id || !activeTemplate?.isDefault) {
+      // For non-default templates, just reload from templates list
+      const original = templates.find((t) => t._id === activeTemplate?._id);
+      if (original) {
+        dispatch({ type: ACTIONS.SET_ACTIVE_TEMPLATE, payload: { ...original } });
+        toast.success('Template reset');
+      }
+      return;
+    }
+
+    try {
+      const res = await resetTemplateToDefault(activeTemplate._id);
+      dispatch({ type: ACTIONS.SET_ACTIVE_TEMPLATE, payload: res.data.data });
+      dispatch({
+        type: ACTIONS.SET_TEMPLATES,
+        payload: templates.map((t) =>
+          t._id === res.data.data._id ? res.data.data : t
+        ),
+      });
+      toast.success('Template reset to default');
+    } catch (err) {
+      toast.error('Failed to reset template');
     }
   };
 
@@ -213,9 +244,23 @@ function Step3Template() {
     toast.success('Logo selected');
   };
 
-  // Get preview data (first CSV row)
+  /**
+   * Subject line change
+   * Uses the dedicated UPDATE_ACTIVE_TEMPLATE_SUBJECT action
+   */
+  const handleSubjectChange = (e) => {
+    dispatch({
+      type: ACTIONS.UPDATE_ACTIVE_TEMPLATE_SUBJECT,
+      payload: e.target.value,
+    });
+  };
+
+  /**
+   * Preview uses the centralized renderTemplate utility
+   * Same function used for email and PDF previews
+   */
   const previewData = csvData.length > 0 ? csvData[0] : {};
-  const previewHtml = activeTemplate ? replacePlaceholders(activeTemplate.html, previewData) : '';
+  const previewHtml = renderTemplate(activeTemplate?.html || '', previewData);
 
   // Navigation
   const handlePrev = () => dispatch({ type: ACTIONS.SET_STEP, payload: 1 });
@@ -262,7 +307,9 @@ function Step3Template() {
                 ? 'Classic corporate style'
                 : tmpl.name === 'Modern'
                 ? 'Vibrant & friendly'
-                : 'Clean & minimal'}
+                : tmpl.isDefault
+                ? 'Clean & minimal'
+                : 'Custom template'}
             </p>
           </button>
         ))}
@@ -277,12 +324,7 @@ function Step3Template() {
               type="text"
               className="form-input"
               value={activeTemplate.subject || ''}
-              onChange={(e) =>
-                dispatch({
-                  type: ACTIONS.SET_ACTIVE_TEMPLATE,
-                  payload: { ...activeTemplate, subject: e.target.value },
-                })
-              }
+              onChange={handleSubjectChange}
               placeholder="Enter email subject line..."
               id="email-subject-input"
             />
@@ -301,7 +343,7 @@ function Step3Template() {
                   className={`btn btn-ghost btn-sm ${showHtmlEditor ? 'btn-active' : ''}`}
                   onClick={toggleHtmlEditor}
                 >
-                  {showHtmlEditor ? '🎨 Visual' : '< /> HTML'}
+                  {showHtmlEditor ? '🎨 Visual' : '</> HTML'}
                 </button>
                 <button className="btn btn-ghost btn-sm" onClick={handleReset}>
                   ↩ Reset
@@ -319,10 +361,11 @@ function Step3Template() {
               </div>
             </div>
 
+            {/* EDITOR: Both modes read/write from activeTemplate.html */}
             {showHtmlEditor ? (
               <textarea
                 className="html-editor"
-                value={htmlCode}
+                value={activeTemplate?.html || ''}
                 onChange={handleHtmlChange}
                 spellCheck={false}
                 id="html-code-editor"

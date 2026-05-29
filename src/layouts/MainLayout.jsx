@@ -1,5 +1,6 @@
 import { useAppContext } from '../context/AppContext';
 import Stepper from '../components/Stepper';
+import UserMenu from '../components/UserMenu';
 import Step1Upload from '../pages/Step1Upload';
 import Step2Review from '../pages/Step2Review';
 import Step3Template from '../pages/Step3Template';
@@ -8,6 +9,7 @@ import Step4Send from '../pages/Step4Send';
 /**
  * MainLayout Component
  * Renders the stepper navigation and active step content
+ * Includes user menu in the header
  */
 const STEPS = [
   { label: 'Upload CSV', icon: '📄', description: 'Upload your recipient data' },
@@ -51,6 +53,7 @@ function MainLayout() {
               <p className="brand-subtitle">Send personalized offer letters at scale</p>
             </div>
           </div>
+          <UserMenu />
         </div>
       </header>
 

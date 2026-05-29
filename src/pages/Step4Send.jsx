@@ -1,12 +1,16 @@
 import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { useAppContext } from '../context/AppContext';
-import { replacePlaceholders } from '../utils/placeholders';
+import { renderTemplate, renderSubject } from '../utils/templateRenderer';
 import { sendMails, previewPDF, verifySmtp } from '../services/api';
 
 /**
  * Step 4 — Preview & Send
- * Preview emails/PDFs per recipient, configure SMTP, and send bulk emails
+ * Preview emails/PDFs per recipient, configure SMTP, send bulk emails,
+ * and reset workflow after dispatch.
+ *
+ * TEMPLATE FIX: Uses renderTemplate/renderSubject from the centralized
+ * templateRenderer utility — same source as Step3 editor and PDF generator.
  */
 function Step4Send() {
   const { state, dispatch, ACTIONS } = useAppContext();
@@ -21,12 +25,13 @@ function Step4Send() {
   } = state;
 
   const [previewIndex, setPreviewIndex] = useState(0);
-  const [activeTab, setActiveTab] = useState('mail'); // 'mail' or 'pdf'
+  const [activeTab, setActiveTab] = useState('mail');
   const [pdfBase64, setPdfBase64] = useState('');
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
   const [showSmtpPanel, setShowSmtpPanel] = useState(true);
   const [isVerifying, setIsVerifying] = useState(false);
   const [smtpVerified, setSmtpVerified] = useState(false);
+  const [showResetModal, setShowResetModal] = useState(false);
 
   // Get selected recipients data
   const selectedData = selectedRecipients
@@ -36,13 +41,9 @@ function Step4Send() {
 
   const currentRecipient = selectedData[previewIndex] || {};
 
-  // Generate preview HTML
-  const previewHtml = activeTemplate
-    ? replacePlaceholders(activeTemplate.html, currentRecipient)
-    : '';
-  const previewSubject = activeTemplate
-    ? replacePlaceholders(activeTemplate.subject || '', currentRecipient)
-    : '';
+  // Generate preview using the CENTRALIZED renderer (same as Step3 + PDF)
+  const previewHtml = renderTemplate(activeTemplate?.html || '', currentRecipient);
+  const previewSubject = renderSubject(activeTemplate?.subject || '', currentRecipient);
 
   // Load PDF preview
   const loadPdfPreview = async () => {
@@ -51,7 +52,7 @@ function Step4Send() {
     try {
       const res = await previewPDF({
         recipient: currentRecipient,
-        templateHtml: activeTemplate.html,
+        templateHtml: activeTemplate.html, // Same source of truth
         logoUrl: logoUrl,
       });
       setPdfBase64(res.data.data);
@@ -137,7 +138,7 @@ function Step4Send() {
     try {
       const res = await sendMails({
         recipients: selectedData,
-        template: activeTemplate,
+        template: activeTemplate, // Sends the CURRENT activeTemplate from context
         smtpConfig: smtpConfig,
         logoUrl: logoUrl,
       });
@@ -157,8 +158,25 @@ function Step4Send() {
     }
   };
 
+  /**
+   * RESET WORKFLOW
+   * Clears CSV data, send results, and navigates back to Step 1.
+   * Preserves templates and SMTP config for reuse.
+   */
+  const handleResetWorkflow = () => {
+    dispatch({ type: ACTIONS.RESET_WORKFLOW });
+    setShowResetModal(false);
+    setPreviewIndex(0);
+    setPdfBase64('');
+    toast.success('Workflow reset! Upload a new CSV to start fresh.');
+  };
+
   // Navigation
   const handlePrev = () => dispatch({ type: ACTIONS.SET_STEP, payload: 2 });
+
+  // Computed stats for results
+  const sentCount = sendResults.filter((r) => r.status === 'sent').length;
+  const failedCount = sendResults.filter((r) => r.status === 'failed').length;
 
   return (
     <div className="step-content">
@@ -405,9 +423,22 @@ function Step4Send() {
               <div className="card-header">
                 <h3>Delivery Status</h3>
                 <span className="badge badge-blue">
-                  {sendResults.filter((r) => r.status === 'sent').length}/{sendResults.length} sent
+                  {sentCount}/{sendResults.length} sent
                 </span>
               </div>
+
+              {/* Stats */}
+              <div className="results-stats">
+                <div className="results-stat results-stat-success">
+                  <span className="results-stat-number">{sentCount}</span>
+                  <span className="results-stat-label">Sent</span>
+                </div>
+                <div className="results-stat results-stat-failed">
+                  <span className="results-stat-number">{failedCount}</span>
+                  <span className="results-stat-label">Failed</span>
+                </div>
+              </div>
+
               <div className="results-list">
                 {sendResults.map((result, idx) => (
                   <div
@@ -432,6 +463,17 @@ function Step4Send() {
                   </div>
                 ))}
               </div>
+
+              {/* Reset Workflow Button — appears after send */}
+              <div className="reset-workflow-section">
+                <button
+                  className="btn btn-outline btn-full"
+                  onClick={() => setShowResetModal(true)}
+                  id="reset-workflow-btn"
+                >
+                  🔄 Start New Batch
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -445,8 +487,57 @@ function Step4Send() {
           </svg>
           Back to Template
         </button>
-        <div></div>
+        {sendResults.length > 0 && (
+          <button
+            className="btn btn-primary"
+            onClick={() => setShowResetModal(true)}
+          >
+            🔄 New Batch
+          </button>
+        )}
       </div>
+
+      {/* Reset Confirmation Modal */}
+      {showResetModal && (
+        <div className="modal-overlay" onClick={() => setShowResetModal(false)}>
+          <div className="modal-content modal-medium" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Start New Batch</h3>
+              <button
+                className="modal-close"
+                onClick={() => setShowResetModal(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="reset-modal-content">
+                <div className="reset-modal-icon">🔄</div>
+                <p><strong>Ready to start a new batch?</strong></p>
+                <p className="reset-modal-desc">
+                  This will clear the current CSV data and results so you can upload a new recipient list. 
+                  Your <strong>templates</strong> and <strong>SMTP settings</strong> will be preserved.
+                </p>
+              </div>
+              <div className="modal-actions">
+                <button
+                  className="btn btn-outline"
+                  onClick={() => setShowResetModal(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleResetWorkflow}
+                  id="confirm-reset-btn"
+                >
+                  🔄 Reset & Start New Batch
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
